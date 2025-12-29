@@ -3,166 +3,206 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.io.wavfile import write
-from datetime import datetime, timedelta
+from datetime import datetime
 import io
 
-# --- 1. 設定頁面配置 (必須在第一行) ---
-st.set_page_config(page_title="Rap Trainer Pro", page_icon="🎤", layout="wide")
+# --- 1. 頁面全域設定 (模擬 App 沉浸感) ---
+st.set_page_config(page_title="Rap Trainer", page_icon="🎤", layout="centered")
 
-# --- 2. 核心邏輯類別 (Backend Logic) ---
+# 注入 CSS 樣式：隱藏多餘選單，放大 BPM 字體，模擬 App 介面
+st.markdown("""
+    <style>
+    /* 隱藏 Streamlit 預設漢堡選單與 Footer */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    /* 調整主要容器寬度，更像手機 App */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 5rem;
+        max_width: 600px;
+    }
+    
+    /* 讓 BPM 數字變得超大 (Soundbrenner 風格) */
+    [data-testid="stMetricValue"] {
+        font-size: 70px !important;
+        font-weight: 700 !important;
+        color: #00E676 !important; /* 螢光綠 */
+        text-align: center !important;
+    }
+    
+    [data-testid="stMetricLabel"] {
+        font-size: 20px !important;
+        text-align: center !important;
+        color: #888888 !important;
+    }
+    
+    /* 讓 Slider 看起來更寬 */
+    .stSlider {
+        padding-top: 20px;
+        padding-bottom: 20px;
+    }
+    
+    /* 按鈕樣式優化 */
+    .stButton button {
+        width: 100%;
+        border-radius: 25px;
+        height: 50px;
+        font-weight: bold;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. 核心邏輯層 ---
 class RapTrainerApp:
     def __init__(self):
-        # 模擬數據生成 (如果沒有歷史記錄)
+        # 初始化：從零開始，不生成假數據
         if 'history' not in st.session_state:
-            dates = [datetime.now() - timedelta(days=i) for i in range(10, 0, -1)]
-            data = {
-                'Date': dates,
-                'BPM': np.random.randint(75, 95, size=10).tolist(), # 模擬進步
-                'SPS': [x * 4 / 60 for x in np.random.randint(75, 95, size=10)],
-                'Focus': ['基礎', '三連音', '清晰度', '呼吸', '加速'] * 2
-            }
-            # 強制最後一次練習數據以便展示
-            data['BPM'][-1] = 92
-            st.session_state.history = pd.DataFrame(data)
+            # 建立空的 DataFrame
+            st.session_state.history = pd.DataFrame(columns=['Date', 'BPM', 'SPS', 'Focus', 'Duration'])
             
-        self.target_bpm = 120 # 快嘴目標
+        self.target_bpm = 120 
 
     def calculate_sps(self, bpm, subdivision=4):
-        """計算每秒音節數 (SPS)"""
         return (bpm * subdivision) / 60
 
     def generate_metronome(self, bpm, duration_sec, ghost_mode=False):
-        """
-        生成節拍器音頻
-        Ghost Mode: 每 4 個小節，第 4 小節靜音
-        """
         sample_rate = 44100
         t = np.linspace(0, duration_sec, int(sample_rate * duration_sec), endpoint=False)
-        
-        # 基礎音頻軌道 (靜音)
         audio_track = np.zeros_like(t)
         
-        # 計算參數
         beat_interval = 60.0 / bpm
         samples_per_beat = int(sample_rate * beat_interval)
-        samples_per_bar = samples_per_beat * 4 # 假設 4/4 拍
         
-        # 製作 "滴" (高頻) 和 "答" (低頻)
+        # 製作聲音 (正弦波)
         def make_click(freq, dur=0.05):
             return 0.5 * np.sin(2 * np.pi * freq * np.linspace(0, dur, int(sample_rate * dur)))
 
-        high_click = make_click(1200) # 第一拍
-        low_click = make_click(800)   # 其他拍
+        high_click = make_click(1200) # 強拍
+        low_click = make_click(800)   # 弱拍
         
-        # 填充節拍
         total_samples = len(audio_track)
         current_sample = 0
         beat_count = 0
         bar_count = 1
         
         while current_sample < total_samples:
-            # Ghost Mode 邏輯: 如果開啟，且是第 4 小節，則跳過聲音填充 (但時間繼續走)
+            # Ghost Mode: 每 4 小節，第 4 小節靜音
             is_ghost_bar = ghost_mode and (bar_count % 4 == 0)
             
             if not is_ghost_bar:
-                # 判斷是重拍還是弱拍
                 click = high_click if beat_count % 4 == 0 else low_click
-                
-                # 確保不超出陣列範圍
                 if current_sample + len(click) < total_samples:
                     audio_track[current_sample:current_sample+len(click)] += click
             
-            # 更新計數
             current_sample += samples_per_beat
             beat_count += 1
             if beat_count % 4 == 0:
                 bar_count += 1
                 
-        # 轉換為 16-bit PCM 格式以供播放
         audio_track = np.int16(audio_track * 32767)
-        
-        # 寫入 BytesIO 物件 (不存硬碟，直接在記憶體處理)
         virtual_file = io.BytesIO()
         write(virtual_file, sample_rate, audio_track)
         return virtual_file
 
-    def add_log(self, bpm, focus):
-        """新增練習記錄"""
-        new_entry = {
+    def add_log(self, bpm, focus, duration):
+        new_entry = pd.DataFrame([{
             'Date': datetime.now(),
             'BPM': bpm,
             'SPS': self.calculate_sps(bpm),
-            'Focus': focus
-        }
-        st.session_state.history = pd.concat([st.session_state.history, pd.DataFrame([new_entry])], ignore_index=True)
+            'Focus': focus,
+            'Duration': duration
+        }])
+        st.session_state.history = pd.concat([st.session_state.history, new_entry], ignore_index=True)
 
-# --- 3. 初始化 App ---
 app = RapTrainerApp()
 
-# --- 4. 前端介面設計 (UI Layout) ---
-st.title("🎤 Rap Trainer Pro")
-st.markdown("### From Novice to Chopper | 你的快嘴訓練中心")
+# --- 3. UI 介面層 (仿 Soundbrenner) ---
 
-# 側邊欄：控制面板
-with st.sidebar:
-    st.header("🎛️ 節拍器設定")
-    bpm_input = st.slider("BPM (速度)", 60, 160, 90)
-    duration_input = st.slider("練習時長 (秒)", 10, 120, 30)
-    ghost_mode = st.checkbox("👻 啟用 Ghost Mode (幽靈小節)", help="每 4 小節會靜音 1 小節，訓練內在節奏感")
+# 頂部：標題
+st.markdown("<h2 style='text-align: center; color: white;'>Rap Trainer Pro</h2>", unsafe_allow_html=True)
+
+# 核心控制區 (放在中間，方便拇指操作)
+col_center = st.container()
+
+with col_center:
+    # 1. 巨大的 BPM 顯示
+    # 這裡我們用 session_state 來記住 BPM，這樣滑桿和手動輸入可以同步
+    if 'bpm' not in st.session_state:
+        st.session_state.bpm = 85
+        
+    current_bpm = st.session_state.bpm
+    sps = app.calculate_sps(current_bpm)
     
+    # 顯示大數字 BPM
+    st.metric(label="BPM (Beats Per Minute)", value=current_bpm, delta=f"{sps:.1f} SPS (音節/秒)")
+
+    # 2. 滑桿 (模擬轉盤)
+    new_bpm = st.slider("", 60, 160, current_bpm, key="bpm_slider", label_visibility="collapsed")
+    if new_bpm != current_bpm:
+        st.session_state.bpm = new_bpm
+        st.rerun()
+
+    # 3. 功能設定 (用 Expander 收納，保持介面乾淨)
+    with st.expander("⚙️ 節拍設定 (Ghost Mode / 時長)"):
+        duration = st.slider("練習時長 (秒)", 10, 300, 30)
+        ghost_mode = st.toggle("👻 啟用 Ghost Mode (幽靈小節)")
+        st.caption("Ghost Mode 會每 3 小節後靜音 1 小節，訓練你的內在時鐘。")
+
+    # 4. 播放按鈕 (生成音頻)
+    if st.button("▶️ 生成節拍音頻", type="primary"):
+        audio_file = app.generate_metronome(current_bpm, duration, ghost_mode)
+        st.audio(audio_file, format='audio/wav')
+        
     st.markdown("---")
-    st.header("📝 練習打卡")
-    focus_input = st.selectbox("今日重點", ["咬字清晰度", "三連音 Flow", "氣息控制", "雙倍速 (Double Time)", "Freestyle"])
-    if st.button("✅ 完成練習並打卡"):
-        app.add_log(bpm_input, focus_input)
-        st.success(f"已記錄！BPM: {bpm_input} | 重點: {focus_input}")
 
-# 主畫面：數據儀表板
-col1, col2 = st.columns(2)
+    # 5. 快速打卡區
+    st.markdown("<h4 style='text-align: center;'>練習結束了嗎？</h4>", unsafe_allow_html=True)
+    col_log1, col_log2 = st.columns([2, 1])
+    with col_log1:
+        focus = st.selectbox("本次重點", ["基礎律動", "咬字清晰度", "三連音 Flow", "快嘴衝刺", "Freestyle"], label_visibility="collapsed")
+    with col_log2:
+        if st.button("📝 打卡"):
+            app.add_log(current_bpm, focus, duration)
+            st.success("已記錄！")
+            st.rerun()
 
-# 指標卡片
-current_sps = app.calculate_sps(bpm_input)
-with col1:
-    st.metric(label="目前設定 BPM", value=bpm_input, delta=f"{bpm_input - 120} 與目標差距")
-with col2:
-    st.metric(label="預估語速 (SPS)", value=f"{current_sps:.1f} 音節/秒", help="以 16 分音符 (1/4) 計算")
-
-# 音頻播放區
-st.markdown("### 🎧 節拍器試聽")
-if st.button("▶️ 生成並播放節拍"):
-    audio_file = app.generate_metronome(bpm_input, duration_input, ghost_mode)
-    st.audio(audio_file, format='audio/wav')
-    if ghost_mode:
-        st.info("👻 Ghost Mode 已啟用：注意聽，第 4 小節會消失，請保持你的 Rap 不斷！")
-
-# 圖表區 (Matplotlib Dark Mode)
-st.markdown("---")
-st.markdown("### 📈 進步軌跡")
-
-# 準備數據
-df = st.session_state.history
-fig, ax = plt.subplots(figsize=(10, 4))
-
-# 設定 iOS Dark Mode 風格
-plt.style.use('dark_background')
-ax.set_facecolor('#1e1e1e')
-fig.patch.set_facecolor('#0e1117')
-
-# 畫圖
-ax.plot(df['Date'], df['BPM'], color='#00ff41', marker='o', linewidth=2, label='你的進度')
-ax.axhline(y=120, color='#ff0055', linestyle='--', linewidth=2, label='Chopper 目標 (120)')
-
-# 裝飾
-ax.set_title("BPM 成長曲線", color='white', fontsize=12)
-ax.set_ylabel("BPM", color='gray')
-ax.grid(color='#333333', linestyle=':', alpha=0.5)
-ax.legend(facecolor='#1e1e1e', labelcolor='white')
-plt.xticks(rotation=45, color='gray')
-plt.yticks(color='gray')
-
-# 在 Streamlit 中顯示圖表
-st.pyplot(fig)
-
-# 顯示最近記錄
-with st.expander("查看詳細數據日誌"):
-    st.dataframe(df.sort_values(by='Date', ascending=False).style.format({"BPM": "{:.0f}", "SPS": "{:.2f}"}))
+# --- 4. 底部：數據概覽 (僅在有數據時顯示) ---
+if not st.session_state.history.empty:
+    st.markdown("---")
+    st.markdown("<h3 style='text-align: center;'>近期表現</h3>", unsafe_allow_html=True)
+    
+    # 準備繪圖數據
+    df = st.session_state.history
+    
+    # 使用 Matplotlib 繪製 Dark Mode 圖表
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(6, 3)) # 手機版圖表小一點
+    
+    # 因為是時間序列，我們只畫最後 10 筆以免太擠
+    recent_df = df.tail(10).reset_index(drop=True)
+    
+    ax.plot(recent_df.index, recent_df['BPM'], color='#00E676', marker='o', linewidth=2, label='BPM')
+    ax.axhline(y=120, color='#FF5252', linestyle='--', linewidth=1, label='目標 (120)')
+    
+    # 圖表美化
+    ax.set_facecolor('#0e1117') # 配合 Streamlit 背景
+    fig.patch.set_facecolor('#0e1117')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.spines['bottom'].set_color('#444')
+    ax.tick_params(colors='gray')
+    ax.set_ylabel("BPM", color='gray')
+    
+    st.pyplot(fig)
+    
+    # 顯示簡單表格
+    st.dataframe(
+        recent_df[['Date', 'BPM', 'SPS', 'Focus']].sort_values(by='Date', ascending=False),
+        hide_index=True,
+        use_container_width=True
+    )
+else:
+    st.info("尚無記錄。點擊上方「打卡」按鈕開始你的第一筆訓練！")
